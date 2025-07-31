@@ -1,6 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import axios from 'axios';
-import { API_BASE_URL } from '../../types';
+import { apiClient } from '../../services/httpInterceptor';
 
 interface TaskProgress {
     current: number;
@@ -18,7 +17,7 @@ interface ProcessingResult {
 export const useAsyncProcessing = () => {
     const [taskProgress, setTaskProgress] = useState<TaskProgress | null>(null);
     const [isProcessing, setIsProcessing] = useState(false);
-    const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const intervalRef = useRef<number | null>(null);
 
     const processAsync = useCallback(async (params: {
         compound_id: string;
@@ -26,10 +25,7 @@ export const useAsyncProcessing = () => {
         force_reprocess?: boolean;
     }): Promise<string> => {
         try {
-            const response = await axios.post(
-                `${API_BASE_URL}/api/documents/process-directory-async`,
-                params
-            );
+            const response = await apiClient.post('/documents/process-directory-async', params);
 
             if (response.data.success && response.data.data.task_id) {
                 setIsProcessing(true);
@@ -52,9 +48,7 @@ export const useAsyncProcessing = () => {
                 try {
                     pollCount++;
                     
-                    const response = await axios.get(
-                        `${API_BASE_URL}/api/documents/task-status/${taskId}`
-                    );
+                    const response = await apiClient.get(`/documents/task-status/${taskId}`);
 
                     if (!response.data.success) {
                         throw new Error('Failed to get task status');
@@ -70,7 +64,7 @@ export const useAsyncProcessing = () => {
                         });
                     } else if (data.state === 'SUCCESS') {
                         if (intervalRef.current) {
-                            clearInterval(intervalRef.current);
+                            window.clearInterval(intervalRef.current);
                             intervalRef.current = null;
                         }
                         setIsProcessing(false);
@@ -78,7 +72,7 @@ export const useAsyncProcessing = () => {
                         resolve(data.result);
                     } else if (data.state === 'FAILURE') {
                         if (intervalRef.current) {
-                            clearInterval(intervalRef.current);
+                            window.clearInterval(intervalRef.current);
                             intervalRef.current = null;
                         }
                         setIsProcessing(false);
@@ -89,7 +83,7 @@ export const useAsyncProcessing = () => {
                     // 超时检查
                     if (pollCount >= maxPolls) {
                         if (intervalRef.current) {
-                            clearInterval(intervalRef.current);
+                            window.clearInterval(intervalRef.current);
                             intervalRef.current = null;
                         }
                         setIsProcessing(false);
@@ -98,7 +92,7 @@ export const useAsyncProcessing = () => {
                     }
                 } catch (error) {
                     if (intervalRef.current) {
-                        clearInterval(intervalRef.current);
+                        window.clearInterval(intervalRef.current);
                         intervalRef.current = null;
                     }
                     setIsProcessing(false);
@@ -111,16 +105,16 @@ export const useAsyncProcessing = () => {
             pollStatus();
 
             // 设置轮询间隔
-            intervalRef.current = setInterval(pollStatus, 5000); // 每5秒检查一次
+            intervalRef.current = window.setInterval(pollStatus, 5000); // 每5秒检查一次
         });
     }, []);
 
     const cancelTask = useCallback(async (taskId: string) => {
         try {
-            await axios.delete(`${API_BASE_URL}/api/documents/cancel-task/${taskId}`);
+            await apiClient.delete(`/documents/cancel-task/${taskId}`);
             
             if (intervalRef.current) {
-                clearInterval(intervalRef.current);
+                window.clearInterval(intervalRef.current);
                 intervalRef.current = null;
             }
             
@@ -134,7 +128,7 @@ export const useAsyncProcessing = () => {
     // 组件卸载时清理
     const cleanup = useCallback(() => {
         if (intervalRef.current) {
-            clearInterval(intervalRef.current);
+            window.clearInterval(intervalRef.current);
             intervalRef.current = null;
         }
     }, []);

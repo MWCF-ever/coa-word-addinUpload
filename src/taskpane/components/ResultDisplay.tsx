@@ -30,7 +30,7 @@
 //  * 从后端API获取用于Word表格的数据
 //  */
 // const fetchWordTableData = async (documentId: string) => {
-//     const apiUrl = `${API_BASE_URL}/api/documents/${documentId}/word-table-data`;
+//     const apiUrl = `${API_BASE_URL}/documents/${documentId}/word-table-data`;
 //     try {
 //         const response = await axios.get(apiUrl, { timeout: 30000 });
 //         if (!response.data.success) {

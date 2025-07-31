@@ -1,19 +1,16 @@
+// src/taskpane/components/App.tsx - Updated with SSO
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Stack, Text, MessageBar, MessageBarType, Spinner, SpinnerSize, PrimaryButton, DefaultButton, ProgressIndicator } from '@fluentui/react';
 import { CompoundSelector } from './CompoundSelector';
 import { TemplateSelector } from './TemplateSelector';
-import { BatchDataTable } from './BatchDataTable';
-import { useAsyncProcessing } from '../hooks/useAsyncProcessing';
-import { useWordDocument } from '../hooks/useWordDocument';
-import { AppState, Compound, Template, BatchData, API_BASE_URL } from '../../types';
-import axios from 'axios';
+//import { BatchDataTable } from './BatchDataTable';
+import { AuthGuard, UserInfo } from '../../components/AuthGuard';
+import { useAuth } from '../../contexts/AuthContext';
+//import { useAsyncProcessing } from '../hooks/useAsyncProcessing';
+//import { useWordDocument } from '../hooks/useWordDocument';
+import { AppState, Compound, Template, BatchData } from '../../types';
+import { apiClient } from '../../services/httpInterceptor';
 import '../taskpane.css';
-
-// 创建axios实例，设置默认配置
-const api = axios.create({
-    baseURL: API_BASE_URL,
-    timeout: 30000,
-});
 
 // 添加连接状态类型
 interface ConnectionStatus {
@@ -24,18 +21,14 @@ interface ConnectionStatus {
     responseTime?: number;
 }
 
-// 添加连接测试函数
+// 添加连接测试函数（现在使用认证的apiClient）
 const testApiConnection = async (): Promise<{ success: boolean; responseTime: number; error?: string }> => {
     const startTime = Date.now();
     try {
-        console.log(`🔍 测试API连接: ${API_BASE_URL}`);
+        console.log(`🔍 测试API连接: ${apiClient.defaults.baseURL}`);
         
-        const response = await axios.get(`${API_BASE_URL}/api/health`, {
-            timeout: 10000,
-            headers: {
-                'Content-Type': 'application/json',
-            },
-        });
+        // 修复：使用正确的健康检查端点
+        const response = await apiClient.get('/health');  // 改为 /health 而不是 /api/health
         
         const responseTime = Date.now() - startTime;
         
@@ -46,21 +39,17 @@ const testApiConnection = async (): Promise<{ success: boolean; responseTime: nu
             console.error(`❌ API连接失败: ${response.status} ${response.statusText}`);
             return { success: false, responseTime, error: `HTTP ${response.status}: ${response.statusText}` };
         }
-    } catch (error) {
+    } catch (error: any) {
         const responseTime = Date.now() - startTime;
         console.error(`❌ API连接异常:`, error);
         
         let errorMessage = 'Unknown error';
-        if (axios.isAxiosError(error)) {
-            if (error.code === 'ECONNABORTED') {
-                errorMessage = 'Request timeout';
-            } else if (error.response) {
-                errorMessage = `HTTP ${error.response.status}: ${error.response.statusText}`;
-            } else if (error.request) {
-                errorMessage = 'Network connection failed';
-            } else {
-                errorMessage = error.message;
-            }
+        if (error.response) {
+            errorMessage = `HTTP ${error.response.status}: ${error.response.statusText}`;
+        } else if (error.request) {
+            errorMessage = 'Network connection failed';
+        } else {
+            errorMessage = error.message;
         }
         
         return { success: false, responseTime, error: errorMessage };
@@ -68,6 +57,9 @@ const testApiConnection = async (): Promise<{ success: boolean; responseTime: nu
 };
 
 export const App: React.FC = () => {
+    // 使用认证上下文
+    const { user, isAuthenticated, getToken } = useAuth();
+    
     // 使用useRef来存储不需要触发重新渲染的值
     const mountedRef = useRef(true);
     const processingRef = useRef(false);
@@ -90,7 +82,7 @@ export const App: React.FC = () => {
     const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>({
         isConnected: false,
         message: '正在检查API连接...',
-        apiUrl: API_BASE_URL
+        apiUrl: apiClient.defaults.baseURL || ''
     });
 
     // 组件卸载时清理
@@ -118,7 +110,7 @@ export const App: React.FC = () => {
             message: result.success 
                 ? `✅ 连接成功 (${result.responseTime}ms)` 
                 : `❌ 连接失败: ${result.error}`,
-            apiUrl: API_BASE_URL,
+            apiUrl: apiClient.defaults.baseURL || '',
             lastChecked: new Date(),
             responseTime: result.responseTime
         });
@@ -130,13 +122,18 @@ export const App: React.FC = () => {
         return result.success;
     }, []);
 
-    // 应用启动时检查连接
+    // 应用启动时检查连接（只有在已认证时才执行）
     useEffect(() => {
         const initializeApp = async () => {
+            if (!isAuthenticated) {
+                return; // 未认证时不初始化
+            }
+
             console.log('🚀 AIMTA应用初始化开始');
-            console.log(`📡 API地址: ${API_BASE_URL}`);
+            console.log(`📡 API地址: ${apiClient.defaults.baseURL}`);
             console.log(`🌍 当前域名: ${window.location.hostname}`);
             console.log(`🔗 完整URL: ${window.location.href}`);
+            console.log(`👤 当前用户: ${user?.name} (${user?.email})`);
             
             // 检查连接
             const isConnected = await checkConnection(false);
@@ -148,45 +145,47 @@ export const App: React.FC = () => {
                 // 连接失败，显示错误信息
                 setState(prev => ({ 
                     ...prev, 
-                    error: `后端API连接失败。请检查:\n1. 网络连接\n2. 后端服务是否正常运行\n3. API地址是否正确: ${API_BASE_URL}`
+                    error: `后端API连接失败。请检查:\n1. 网络连接\n2. 后端服务是否正常运行\n3. API地址是否正确: ${apiClient.defaults.baseURL}`
                 }));
             }
         };
         
-        initializeApp();
-    }, [checkConnection]);
+        if (isAuthenticated) {
+            initializeApp();
+        }
+    }, [isAuthenticated, user, checkConnection]);
 
     // 使用useCallback优化回调函数
     const fetchCompounds = useCallback(async () => {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || !isAuthenticated) return;
         
         try {
             setState(prev => ({ ...prev, isLoading: true, error: undefined }));
-            console.log(`📡 请求化合物列表: ${API_BASE_URL}/api/compounds`);
+            console.log(`📡 请求化合物列表: ${apiClient.defaults.baseURL}/compounds`);
             
-            const response = await axios.get(`${API_BASE_URL}/api/compounds`, {
-                timeout: 10000,
-            });
+            const response = await apiClient.get('/compounds');
             
             if (mountedRef.current) {
                 console.log('✅ 化合物数据获取成功:', response.data);
                 setCompounds(response.data.data || []);
             }
-        } catch (error) {
+        } catch (error: any) {
             console.error('❌ 获取化合物列表失败:', error);
             
             if (mountedRef.current) {
                 let errorMessage = '获取化合物列表失败。';
-                if (axios.isAxiosError(error)) {
-                    if (error.code === 'ECONNABORTED') {
-                        errorMessage += ' 请求超时。';
-                    } else if (error.response) {
-                        errorMessage += ` HTTP ${error.response.status}: ${error.response.statusText}`;
-                    } else if (error.request) {
-                        errorMessage += ' 网络连接失败。';
+                if (error.response) {
+                    if (error.response.status === 401) {
+                        errorMessage += ' 认证失败，请重新登录。';
+                    } else if (error.response.status === 403) {
+                        errorMessage += ' 访问被拒绝，请检查权限。';
                     } else {
-                        errorMessage += ` ${error.message}`;
+                        errorMessage += ` HTTP ${error.response.status}: ${error.response.statusText}`;
                     }
+                } else if (error.request) {
+                    errorMessage += ' 网络连接失败。';
+                } else {
+                    errorMessage += ` ${error.message}`;
                 }
                 
                 setState(prev => ({ 
@@ -207,18 +206,17 @@ export const App: React.FC = () => {
                 setState(prev => ({ ...prev, isLoading: false }));
             }
         }
-    }, []);
+    }, [isAuthenticated]);
 
     const fetchTemplates = useCallback(async (compoundId: string) => {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || !isAuthenticated) return;
         
         try {
             setState(prev => ({ ...prev, isLoading: true, error: undefined }));
             console.log(`📡 请求模板列表: compound_id=${compoundId}`);
             
-            const response = await axios.get(`${API_BASE_URL}/api/templates`, {
-                params: { compound_id: compoundId },
-                timeout: 10000,
+            const response = await apiClient.get('/templates', {
+                params: { compound_id: compoundId }
             });
             
             if (mountedRef.current) {
@@ -238,14 +236,14 @@ export const App: React.FC = () => {
                 setState(prev => ({ ...prev, isLoading: false }));
             }
         }
-    }, []);
+    }, [isAuthenticated]);
 
     // Fetch templates when compound changes
     useEffect(() => {
-        if (state.selectedCompound && mountedRef.current) {
+        if (state.selectedCompound && mountedRef.current && isAuthenticated) {
             fetchTemplates(state.selectedCompound.id);
         }
-    }, [state.selectedCompound, fetchTemplates]);
+    }, [state.selectedCompound, fetchTemplates, isAuthenticated]);
 
     const handleCompoundSelect = useCallback((compound: Compound) => {
         console.log('📋 选择化合物:', compound);
@@ -278,7 +276,7 @@ export const App: React.FC = () => {
     }, [checkConnection, fetchCompounds]);
 
     const handleProcessFiles = useCallback(async () => {
-        if (!state.selectedCompound || !state.selectedTemplate) {
+        if (!state.selectedCompound || !state.selectedTemplate || !isAuthenticated) {
             setState(prev => ({ 
                 ...prev, 
                 error: 'Please select compound and template first.' 
@@ -295,15 +293,12 @@ export const App: React.FC = () => {
             setProcessingStatus('Checking database for existing batch analysis data...');
             
             // 第一步：检查数据库中是否已有数据
-            const cacheCheckResponse = await axios.get(
-                `${API_BASE_URL}/api/documents/check-cache`,
-                { 
-                    params: {
-                        compound_id: state.selectedCompound.id,
-                        template_id: state.selectedTemplate.id
-                    }
+            const cacheCheckResponse = await apiClient.get('/documents/check-cache', { 
+                params: {
+                    compound_id: state.selectedCompound.id,
+                    template_id: state.selectedTemplate.id
                 }
-            );
+            });
 
             const cachedData = cacheCheckResponse.data.data;
             
@@ -328,15 +323,7 @@ export const App: React.FC = () => {
                 
                 console.log('发送处理请求:', requestData);
                 
-                const processResponse = await axios.post(
-                    `${API_BASE_URL}/api/documents/process-directory`,
-                    requestData,
-                    {
-                        headers: {
-                            'Content-Type': 'application/json'
-                        }
-                    }
-                );
+                const processResponse = await apiClient.post('/documents/process-directory', requestData);
 
                 const batchData = processResponse.data.data.batchData || [];
                 setBatchDataList(batchData);
@@ -345,36 +332,33 @@ export const App: React.FC = () => {
                 console.log('新处理数据:', batchData);
             }
 
-        } catch (error) {
+        } catch (error: any) {
             console.error('处理文件时出错:', error);
             
-            if (axios.isAxiosError(error) && error.response) {
-                const response = error.response;
-                console.error('响应错误:', response.data);
-                console.error('状态码:', response.status);
-                
-                let errorMessage = 'Failed to process files. ';
-                if (response.status === 422) {
+            let errorMessage = 'Failed to process files. ';
+            if (error.response) {
+                if (error.response.status === 401) {
+                    errorMessage += 'Authentication failed. Please log in again.';
+                } else if (error.response.status === 403) {
+                    errorMessage += 'Access denied. Please check your permissions.';
+                } else if (error.response.status === 422) {
                     errorMessage += 'Request validation failed. ';
-                    if (response.data?.detail) {
-                        errorMessage += `Details: ${JSON.stringify(response.data.detail)}`;
+                    if (error.response.data?.detail) {
+                        errorMessage += `Details: ${JSON.stringify(error.response.data.detail)}`;
                     }
-                } else if (response.data?.detail) {
-                    errorMessage += response.data.detail;
+                } else if (error.response.data?.detail) {
+                    errorMessage += error.response.data.detail;
                 } else {
                     errorMessage += 'Please try again.';
                 }
-                
-                setState(prev => ({ 
-                    ...prev, 
-                    error: errorMessage
-                }));
             } else {
-                setState(prev => ({ 
-                    ...prev, 
-                    error: 'Failed to process files. Please try again.' 
-                }));
+                errorMessage += 'Please try again.';
             }
+            
+            setState(prev => ({ 
+                ...prev, 
+                error: errorMessage
+            }));
             setProcessingStatus('');
         } finally {
             processingRef.current = false;
@@ -382,11 +366,10 @@ export const App: React.FC = () => {
                 setState(prev => ({ ...prev, isLoading: false }));
             }
         }
-    }, [state.selectedCompound, state.selectedTemplate]);
-
+    }, [state.selectedCompound, state.selectedTemplate, isAuthenticated]);
 
     const handleForceReprocess = useCallback(async () => {
-        if (!state.selectedCompound || !state.selectedTemplate) {
+        if (!state.selectedCompound || !state.selectedTemplate || !isAuthenticated) {
             setState(prev => ({ 
                 ...prev, 
                 error: 'Please select compound and template first.' 
@@ -404,15 +387,7 @@ export const App: React.FC = () => {
                 force_reprocess: true
             };
             
-            const processResponse = await axios.post(
-                `${API_BASE_URL}/api/documents/process-directory`,
-                requestData,
-                {
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
-                }
-            );
+            const processResponse = await apiClient.post('/documents/process-directory', requestData);
 
             const batchData = processResponse.data.data.batchData || [];
             setBatchDataList(batchData);
@@ -430,10 +405,10 @@ export const App: React.FC = () => {
         } finally {
             setState(prev => ({ ...prev, isLoading: false }));
         }
-    }, [state.selectedCompound, state.selectedTemplate]);
+    }, [state.selectedCompound, state.selectedTemplate, isAuthenticated]);
 
     const handleClearCache = useCallback(async () => {
-        if (!state.selectedCompound || !state.selectedTemplate) {
+        if (!state.selectedCompound || !state.selectedTemplate || !isAuthenticated) {
             setState(prev => ({ 
                 ...prev, 
                 error: 'Please select compound and template first.' 
@@ -445,15 +420,12 @@ export const App: React.FC = () => {
             setState(prev => ({ ...prev, isLoading: true, error: undefined }));
             setProcessingStatus('Clearing cached data...');
             
-            await axios.delete(
-                `${API_BASE_URL}/api/documents/clear-cache`,
-                { 
-                    params: {
-                        compound_id: state.selectedCompound.id,
-                        template_id: state.selectedTemplate.id
-                    }
+            await apiClient.delete('/documents/clear-cache', { 
+                params: {
+                    compound_id: state.selectedCompound.id,
+                    template_id: state.selectedTemplate.id
                 }
-            );
+            });
 
             setBatchDataList([]);
             setProcessingStatus('Cache cleared successfully!');
@@ -469,9 +441,9 @@ export const App: React.FC = () => {
         } finally {
             setState(prev => ({ ...prev, isLoading: false }));
         }
-    }, [state.selectedCompound, state.selectedTemplate]);
+    }, [state.selectedCompound, state.selectedTemplate, isAuthenticated]);
 
-    // 根据模板信息创建完整的Word文档 - 优化版本
+    // Word文档创建功能保持不变
     const handleCreateWordDocument = useCallback(async () => {
         if (!state.selectedTemplate || batchDataList.length === 0) {
             setState(prev => ({ 
@@ -1337,201 +1309,178 @@ export const App: React.FC = () => {
     };
 
     return (
-        <Stack className="app-container" tokens={{ childrenGap: 20 }}>
-            <Stack.Item>
-                <Text variant="xLarge" className="app-title">AIMTA Batch Analysis Processor</Text>
-            </Stack.Item>
+        <AuthGuard requireAuth={true}>
+            <Stack className="app-container" tokens={{ childrenGap: 20 }}>
+                <Stack.Item>
+                    <Text variant="xLarge" className="app-title">AIMTA Batch Analysis Processor</Text>
+                </Stack.Item>
 
-                        {/* 连接状态显示 - 新增 */}
-            <MessageBar 
-                messageBarType={connectionStatus.isConnected ? MessageBarType.success : MessageBarType.warning}
-                isMultiline={true}
-            >
-                <div>
-                    <strong>API连接状态:</strong> {connectionStatus.message}
-                    <br />
-                    <small>API地址: {connectionStatus.apiUrl}</small>
-                    {connectionStatus.lastChecked && (
-                        <>
-                            <br />
-                            <small>最后检查: {connectionStatus.lastChecked.toLocaleTimeString()}</small>
-                        </>
-                    )}
-                    {connectionStatus.responseTime && (
-                        <>
-                            <br />
-                            <small>响应时间: {connectionStatus.responseTime}ms</small>
-                        </>
-                    )}
-                </div>
-            </MessageBar>
+                {/* 用户信息显示 */}
+                <UserInfo />
 
-            {state.error && (
+                {/* 连接状态显示 */}
                 <MessageBar 
-                    messageBarType={MessageBarType.error}
-                    onDismiss={() => setState(prev => ({ ...prev, error: undefined }))}
+                    messageBarType={connectionStatus.isConnected ? MessageBarType.success : MessageBarType.warning}
                     isMultiline={true}
                 >
-                    {state.error}
+                    <div>
+                        <strong>API连接状态:</strong> {connectionStatus.message}
+                        <br />
+                        <small>API地址: {connectionStatus.apiUrl}</small>
+                        {connectionStatus.lastChecked && (
+                            <>
+                                <br />
+                                <small>最后检查: {connectionStatus.lastChecked.toLocaleTimeString()}</small>
+                            </>
+                        )}
+                        {connectionStatus.responseTime && (
+                            <>
+                                <br />
+                                <small>响应时间: {connectionStatus.responseTime}ms</small>
+                            </>
+                        )}
+                    </div>
                 </MessageBar>
-            )}
 
-            {state.isLoading && (
-                <Stack horizontalAlign="center" tokens={{ padding: 20 }}>
-                    <Spinner size={SpinnerSize.large} label="Processing..." />
-                </Stack>
-            )}
-
-            {processingStatus && (
-                <MessageBar messageBarType={MessageBarType.info}>
-                    {processingStatus}
-                </MessageBar>
-            )}
-
-            {/* 如果连接失败，显示重试按钮 - 新增 */}
-            {!connectionStatus.isConnected && (
-                <Stack horizontalAlign="center" tokens={{ padding: 20 }}>
-                    <PrimaryButton
-                        text="重新测试连接"
-                        iconProps={{ iconName: 'Refresh' }}
-                        onClick={handleReconnect}
-                        disabled={state.isLoading}
-                    />
-                </Stack>
-            )}
-
-
-            {state.error && (
-                <MessageBar 
-                    messageBarType={MessageBarType.error}
-                    onDismiss={() => setState(prev => ({ ...prev, error: undefined }))}
-                >
-                    {state.error}
-                </MessageBar>
-            )}
-
-            {state.isLoading && (
-                <Stack horizontalAlign="center" tokens={{ padding: 20 }}>
-                    <Spinner size={SpinnerSize.large} label="Processing..." />
-                </Stack>
-            )}
-
-            {processingStatus && (
-                <MessageBar messageBarType={MessageBarType.info}>
-                    {processingStatus}
-                </MessageBar>
-            )}
-
-            <Stack tokens={{ childrenGap: 15 }}>
-                <CompoundSelector
-                    compounds={compounds}
-                    selectedCompound={state.selectedCompound}
-                    onSelect={handleCompoundSelect}
-                    disabled={state.isLoading}
-                />
-
-                {state.selectedCompound && (
-                    <TemplateSelector
-                        templates={templates}
-                        selectedTemplate={state.selectedTemplate}
-                        onSelect={handleTemplateSelect}
-                        disabled={state.isLoading}
-                    />
+                {state.error && (
+                    <MessageBar 
+                        messageBarType={MessageBarType.error}
+                        onDismiss={() => setState(prev => ({ ...prev, error: undefined }))}
+                        isMultiline={true}
+                    >
+                        {state.error}
+                    </MessageBar>
                 )}
 
-                {state.selectedCompound && state.selectedTemplate && (
-                    <Stack tokens={{ childrenGap: 10 }}>
-                        <PrimaryButton
-                            text="Load/Process AIMTA Files"
-                            iconProps={{ iconName: 'DatabaseSearch' }}
-                            onClick={handleProcessFiles}
-                            disabled={state.isLoading}
-                            styles={{ root: { width: '100%' } }}
-                        />
-
-                        {batchDataList.length > 0 && (
-                            <Stack tokens={{ childrenGap: 10 }}>
-                                <MessageBar messageBarType={MessageBarType.success}>
-                                    {`Ready to create document: ${batchDataList.length} batches available`}
-                                    <br />
-                                    {`Batch data: ${batchDataList.map(b => b.batch_number).join(', ')}`}
-                                </MessageBar>
-                                
-                                {/* 主要文档创建按钮 */}
-                                <PrimaryButton
-                                    text="Create Complete AIMTA Document"
-                                    iconProps={{ iconName: 'NewTeamProject' }}
-                                    onClick={handleCreateWordDocument}
-                                    disabled={state.isLoading}
-                                    styles={{ 
-                                        root: { 
-                                            width: '100%',
-                                            backgroundColor: '#0078d4',
-                                            borderColor: '#0078d4'
-                                        } 
-                                    }}
-                                />
-                                
-                                {/* 数据管理按钮组 */}
-                                <Stack horizontal tokens={{ childrenGap: 10 }}>
-                                    <DefaultButton
-                                        text="Force Reprocess"
-                                        iconProps={{ iconName: 'Refresh' }}
-                                        onClick={handleForceReprocess}
-                                        disabled={state.isLoading}
-                                        styles={{ 
-                                            root: { 
-                                                flex: 1,
-                                                backgroundColor: '#FF8C00',
-                                                color: 'white',
-                                                borderColor: '#FF8C00'
-                                            } 
-                                        }}
-                                    />
-                                    <DefaultButton
-                                        text="Clear Cache"
-                                        iconProps={{ iconName: 'Delete' }}
-                                        onClick={handleClearCache}
-                                        disabled={state.isLoading}
-                                        styles={{ 
-                                            root: { 
-                                                flex: 1,
-                                                backgroundColor: '#DC143C',
-                                                color: 'white',
-                                                borderColor: '#DC143C'
-                                            } 
-                                        }}
-                                    />
-                                </Stack>
-                                
-                                {/* 保留原有的简单插入功能 */}
-                                <DefaultButton
-                                    text="Insert Tables Only (Legacy)"
-                                    iconProps={{ iconName: 'Table' }}
-                                    onClick={handleInsertToWord}
-                                    disabled={state.isLoading}
-                                    styles={{ root: { width: '100%' } }}
-                                />
-                            </Stack>
-                        )}
+                {state.isLoading && (
+                    <Stack horizontalAlign="center" tokens={{ padding: 20 }}>
+                        <Spinner size={SpinnerSize.large} label="Processing..." />
                     </Stack>
                 )}
-            </Stack>
 
-            <Stack className="help-text">
-                <Text variant="small">  - Select compound and template region</Text>
-                <Text variant="small">  - Click "Load/Process AIMTA Files" to check database first, then process if needed</Text>
-                <Text variant="small">  - "Create Complete AIMTA Document" generates a full formatted document with:</Text>
-                <Text variant="small">  - Template-based formatting (Calibri font, proper spacing, colors)</Text>
-                <Text variant="small">  - Professional table of contents and list of tables</Text>
-                <Text variant="small">  - Headers/footers (with fallback instructions if not supported)</Text>
-                <Text variant="small">  - Properly formatted tables with extracted batch data</Text>
-                <Text variant="small">  - Data Management:</Text>
-                <Text variant="small">  - "Force Reprocess": Re-scan PDFs and update database (orange button)</Text>
-                <Text variant="small">  - "Clear Cache": Remove cached data from database (red button)</Text>
-                <Text variant="small">  - "Insert Tables Only" provides legacy functionality for simple table insertion</Text>
-                <Text variant="small">  - Database caching prevents duplicate processing and improves performance</Text>
-            </Stack>
+                {processingStatus && (
+                    <MessageBar messageBarType={MessageBarType.info}>
+                        {processingStatus}
+                    </MessageBar>
+                )}
+
+                {/* 如果连接失败，显示重试按钮 */}
+                {!connectionStatus.isConnected && (
+                    <Stack horizontalAlign="center" tokens={{ padding: 20 }}>
+                        <PrimaryButton
+                            text="重新测试连接"
+                            iconProps={{ iconName: 'Refresh' }}
+                            onClick={handleReconnect}
+                            disabled={state.isLoading}
+                        />
+                    </Stack>
+                )}
+
+                <Stack tokens={{ childrenGap: 15 }}>
+                    <CompoundSelector
+                        compounds={compounds}
+                        selectedCompound={state.selectedCompound}
+                        onSelect={handleCompoundSelect}
+                        disabled={state.isLoading}
+                    />
+
+                    {state.selectedCompound && (
+                        <TemplateSelector
+                            templates={templates}
+                            selectedTemplate={state.selectedTemplate}
+                            onSelect={handleTemplateSelect}
+                            disabled={state.isLoading}
+                        />
+                    )}
+
+                    {state.selectedCompound && state.selectedTemplate && (
+                        <Stack tokens={{ childrenGap: 10 }}>
+                            <PrimaryButton
+                                text="Load/Process AIMTA Files"
+                                iconProps={{ iconName: 'DatabaseSearch' }}
+                                onClick={handleProcessFiles}
+                                disabled={state.isLoading}
+                                styles={{ root: { width: '100%' } }}
+                            />
+
+                            {batchDataList.length > 0 && (
+                                <Stack tokens={{ childrenGap: 10 }}>
+                                    <MessageBar messageBarType={MessageBarType.success}>
+                                        {`Ready to create document: ${batchDataList.length} batches available`}
+                                        <br />
+                                        {`Batch data: ${batchDataList.map(b => b.batch_number).join(', ')}`}
+                                    </MessageBar>
+                                    
+                                    {/* 主要文档创建按钮 */}
+                                    <PrimaryButton
+                                        text="Create Complete AIMTA Document"
+                                        iconProps={{ iconName: 'NewTeamProject' }}
+                                        onClick={handleCreateWordDocument}
+                                        disabled={state.isLoading}
+                                        styles={{ 
+                                            root: { 
+                                                width: '100%',
+                                                backgroundColor: '#0078d4',
+                                                borderColor: '#0078d4'
+                                            } 
+                                        }}
+                                    />
+                                    
+                                    {/* 数据管理按钮组 */}
+                                    <Stack horizontal tokens={{ childrenGap: 10 }}>
+                                        <DefaultButton
+                                            text="Force Reprocess"
+                                            iconProps={{ iconName: 'Refresh' }}
+                                            onClick={handleForceReprocess}
+                                            disabled={state.isLoading}
+                                            styles={{ 
+                                                root: { 
+                                                    flex: 1,
+                                                    backgroundColor: '#FF8C00',
+                                                    color: 'white',
+                                                    borderColor: '#FF8C00'
+                                                } 
+                                            }}
+                                        />
+                                        <DefaultButton
+                                            text="Clear Cache"
+                                            iconProps={{ iconName: 'Delete' }}
+                                            onClick={handleClearCache}
+                                            disabled={state.isLoading}
+                                            styles={{ 
+                                                root: { 
+                                                    flex: 1,
+                                                    backgroundColor: '#DC143C',
+                                                    color: 'white',
+                                                    borderColor: '#DC143C'
+                                                } 
+                                            }}
+                                        />
+                                    </Stack>
+                                    
+                                    {/* 保留原有的简单插入功能 */}
+                                    <DefaultButton
+                                        text="Insert Tables Only (Legacy)"
+                                        iconProps={{ iconName: 'Table' }}
+                                        onClick={handleInsertToWord}
+                                        disabled={state.isLoading}
+                                        styles={{ root: { width: '100%' } }}
+                                    />
+                                </Stack>
+                            )}
+                        </Stack>
+                    )}
+                </Stack>
+
+                <Stack className="help-text">
+                    <Text variant="small">  - 🔐 Secure authentication with BeiGene SSO</Text>
+                    <Text variant="small">  - Select compound and template region</Text>
+                    <Text variant="small">  - Click "Load/Process AIMTA Files" to check database first, then process if needed</Text>
+                    <Text variant="small">  - "Create Complete AIMTA Document" generates a full formatted document</Text>
+                    <Text variant="small">  - All API requests are automatically authenticated</Text>
+                    <Text variant="small">  - Token refresh happens automatically every 5 minutes</Text>
+                </Stack>
         </Stack>
+        </AuthGuard>
     );
 };

@@ -25,8 +25,8 @@ module.exports = (env, argv) => {
       path: path.resolve(__dirname, 'dist'),
       filename: isDev ? '[name].js' : '[name].[contenthash].js',
       clean: true,
-      // 添加publicPath配置，确保资源路径正确
-      publicPath: '/'
+      // 修复：使用相对路径而不是绝对路径
+      publicPath: './'
     },
     resolve: {
       extensions: ['.ts', '.tsx', '.js', '.jsx']
@@ -63,7 +63,9 @@ module.exports = (env, argv) => {
       new HtmlWebpackPlugin({
         template: './src/taskpane/index.html',
         filename: 'taskpane.html',
-        chunks: ['taskpane']
+        chunks: ['taskpane'],
+        // 确保使用相对路径
+        inject: 'body'
       }),
       new CopyWebpackPlugin({
         patterns: [
@@ -74,7 +76,7 @@ module.exports = (env, argv) => {
           {
             from: 'assets',
             to: 'assets',
-            noErrorOnMissing: true // 如果assets文件夹不存在，不报错
+            noErrorOnMissing: true
           }
         ]
       })
@@ -90,7 +92,9 @@ module.exports = (env, argv) => {
         'Access-Control-Allow-Headers': 'X-Requested-With, content-type, Authorization'
       },
       static: {
-        directory: path.join(__dirname, 'dist')
+        directory: path.join(__dirname, 'dist'),
+        // 重要：使用相对路径
+        publicPath: '/'
       }
     } : undefined,
     optimization: {
@@ -104,6 +108,12 @@ module.exports = (env, argv) => {
           }
         }
       }
+    },
+    // 性能警告配置 - 提高限制或禁用警告
+    performance: {
+      hints: isDev ? false : 'warning',
+      maxAssetSize: 2000000, // 2MB
+      maxEntrypointSize: 2000000 // 2MB
     }
   };
 };
