@@ -1,67 +1,254 @@
-import React, { useState, useEffect } from 'react';
-import { Stack, Text, MessageBar, MessageBarType, Spinner, SpinnerSize, PrimaryButton, DefaultButton } from '@fluentui/react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Stack, Text, MessageBar, MessageBarType, Spinner, SpinnerSize, PrimaryButton, DefaultButton, ProgressIndicator } from '@fluentui/react';
 import { CompoundSelector } from './CompoundSelector';
 import { TemplateSelector } from './TemplateSelector';
+import { BatchDataTable } from './BatchDataTable';
+import { useAsyncProcessing } from '../hooks/useAsyncProcessing';
+import { useWordDocument } from '../hooks/useWordDocument';
 import { AppState, Compound, Template, BatchData, API_BASE_URL } from '../../types';
 import axios from 'axios';
 import '../taskpane.css';
 
+// 创建axios实例，设置默认配置
+const api = axios.create({
+    baseURL: API_BASE_URL,
+    timeout: 30000,
+});
+
+// 添加连接状态类型
+interface ConnectionStatus {
+    isConnected: boolean;
+    message: string;
+    apiUrl: string;
+    lastChecked?: Date;
+    responseTime?: number;
+}
+
+// 添加连接测试函数
+const testApiConnection = async (): Promise<{ success: boolean; responseTime: number; error?: string }> => {
+    const startTime = Date.now();
+    try {
+        console.log(`🔍 测试API连接: ${API_BASE_URL}`);
+        
+        const response = await axios.get(`${API_BASE_URL}/api/health`, {
+            timeout: 10000,
+            headers: {
+                'Content-Type': 'application/json',
+            },
+        });
+        
+        const responseTime = Date.now() - startTime;
+        
+        if (response.status === 200) {
+            console.log(`✅ API连接成功 (${responseTime}ms):`, response.data);
+            return { success: true, responseTime };
+        } else {
+            console.error(`❌ API连接失败: ${response.status} ${response.statusText}`);
+            return { success: false, responseTime, error: `HTTP ${response.status}: ${response.statusText}` };
+        }
+    } catch (error) {
+        const responseTime = Date.now() - startTime;
+        console.error(`❌ API连接异常:`, error);
+        
+        let errorMessage = 'Unknown error';
+        if (axios.isAxiosError(error)) {
+            if (error.code === 'ECONNABORTED') {
+                errorMessage = 'Request timeout';
+            } else if (error.response) {
+                errorMessage = `HTTP ${error.response.status}: ${error.response.statusText}`;
+            } else if (error.request) {
+                errorMessage = 'Network connection failed';
+            } else {
+                errorMessage = error.message;
+            }
+        }
+        
+        return { success: false, responseTime, error: errorMessage };
+    }
+};
+
 export const App: React.FC = () => {
+    // 使用useRef来存储不需要触发重新渲染的值
+    const mountedRef = useRef(true);
+    const processingRef = useRef(false);
+
+    // 合并相关状态，减少状态更新次数
     const [state, setState] = useState<AppState>({
         extractedData: [],
-        isLoading: false
+        isLoading: false,
+        selectedCompound: undefined,
+        selectedTemplate: undefined,
+        error: undefined
     });
 
     const [compounds, setCompounds] = useState<Compound[]>([]);
     const [templates, setTemplates] = useState<Template[]>([]);
     const [batchDataList, setBatchDataList] = useState<BatchData[]>([]);
     const [processingStatus, setProcessingStatus] = useState<string>('');
+    
+    // 添加连接状态
+    const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>({
+        isConnected: false,
+        message: '正在检查API连接...',
+        apiUrl: API_BASE_URL
+    });
 
-    // Fetch compounds on mount
+    // 组件卸载时清理
     useEffect(() => {
-        fetchCompounds();
+        return () => {
+            mountedRef.current = false;
+        };
+    }, []);
+
+    // 添加连接测试函数
+    const checkConnection = useCallback(async (showLoading: boolean = true) => {
+        if (showLoading) {
+            setState(prev => ({ ...prev, isLoading: true }));
+        }
+        
+        setConnectionStatus(prev => ({
+            ...prev,
+            message: '正在测试连接...'
+        }));
+        
+        const result = await testApiConnection();
+        
+        setConnectionStatus({
+            isConnected: result.success,
+            message: result.success 
+                ? `✅ 连接成功 (${result.responseTime}ms)` 
+                : `❌ 连接失败: ${result.error}`,
+            apiUrl: API_BASE_URL,
+            lastChecked: new Date(),
+            responseTime: result.responseTime
+        });
+        
+        if (showLoading) {
+            setState(prev => ({ ...prev, isLoading: false }));
+        }
+        
+        return result.success;
+    }, []);
+
+    // 应用启动时检查连接
+    useEffect(() => {
+        const initializeApp = async () => {
+            console.log('🚀 AIMTA应用初始化开始');
+            console.log(`📡 API地址: ${API_BASE_URL}`);
+            console.log(`🌍 当前域名: ${window.location.hostname}`);
+            console.log(`🔗 完整URL: ${window.location.href}`);
+            
+            // 检查连接
+            const isConnected = await checkConnection(false);
+            
+            if (isConnected) {
+                // 连接成功，获取化合物数据
+                fetchCompounds();
+            } else {
+                // 连接失败，显示错误信息
+                setState(prev => ({ 
+                    ...prev, 
+                    error: `后端API连接失败。请检查:\n1. 网络连接\n2. 后端服务是否正常运行\n3. API地址是否正确: ${API_BASE_URL}`
+                }));
+            }
+        };
+        
+        initializeApp();
+    }, [checkConnection]);
+
+    // 使用useCallback优化回调函数
+    const fetchCompounds = useCallback(async () => {
+        if (!mountedRef.current) return;
+        
+        try {
+            setState(prev => ({ ...prev, isLoading: true, error: undefined }));
+            console.log(`📡 请求化合物列表: ${API_BASE_URL}/api/compounds`);
+            
+            const response = await axios.get(`${API_BASE_URL}/api/compounds`, {
+                timeout: 10000,
+            });
+            
+            if (mountedRef.current) {
+                console.log('✅ 化合物数据获取成功:', response.data);
+                setCompounds(response.data.data || []);
+            }
+        } catch (error) {
+            console.error('❌ 获取化合物列表失败:', error);
+            
+            if (mountedRef.current) {
+                let errorMessage = '获取化合物列表失败。';
+                if (axios.isAxiosError(error)) {
+                    if (error.code === 'ECONNABORTED') {
+                        errorMessage += ' 请求超时。';
+                    } else if (error.response) {
+                        errorMessage += ` HTTP ${error.response.status}: ${error.response.statusText}`;
+                    } else if (error.request) {
+                        errorMessage += ' 网络连接失败。';
+                    } else {
+                        errorMessage += ` ${error.message}`;
+                    }
+                }
+                
+                setState(prev => ({ 
+                    ...prev, 
+                    error: errorMessage
+                }));
+                
+                // 连接失败时更新连接状态
+                setConnectionStatus(prev => ({
+                    ...prev,
+                    isConnected: false,
+                    message: '❌ API连接已断开',
+                    lastChecked: new Date()
+                }));
+            }
+        } finally {
+            if (mountedRef.current) {
+                setState(prev => ({ ...prev, isLoading: false }));
+            }
+        }
+    }, []);
+
+    const fetchTemplates = useCallback(async (compoundId: string) => {
+        if (!mountedRef.current) return;
+        
+        try {
+            setState(prev => ({ ...prev, isLoading: true, error: undefined }));
+            console.log(`📡 请求模板列表: compound_id=${compoundId}`);
+            
+            const response = await axios.get(`${API_BASE_URL}/api/templates`, {
+                params: { compound_id: compoundId },
+                timeout: 10000,
+            });
+            
+            if (mountedRef.current) {
+                console.log('✅ 模板数据获取成功:', response.data);
+                setTemplates(response.data.data || []);
+            }
+        } catch (error) {
+            console.error('❌ 获取模板列表失败:', error);
+            if (mountedRef.current) {
+                setState(prev => ({ 
+                    ...prev, 
+                    error: '获取模板列表失败。请重试。' 
+                }));
+            }
+        } finally {
+            if (mountedRef.current) {
+                setState(prev => ({ ...prev, isLoading: false }));
+            }
+        }
     }, []);
 
     // Fetch templates when compound changes
     useEffect(() => {
-        if (state.selectedCompound) {
+        if (state.selectedCompound && mountedRef.current) {
             fetchTemplates(state.selectedCompound.id);
         }
-    }, [state.selectedCompound]);
+    }, [state.selectedCompound, fetchTemplates]);
 
-    const fetchCompounds = async () => {
-        try {
-            setState(prev => ({ ...prev, isLoading: true, error: undefined }));
-            const response = await axios.get(`${API_BASE_URL}/api/compounds`);
-            setCompounds(response.data.data || []);
-        } catch (error) {
-            setState(prev => ({ 
-                ...prev, 
-                error: 'Failed to fetch compounds. Please check your connection.' 
-            }));
-        } finally {
-            setState(prev => ({ ...prev, isLoading: false }));
-        }
-    };
-
-    const fetchTemplates = async (compoundId: string) => {
-        try {
-            setState(prev => ({ ...prev, isLoading: true, error: undefined }));
-            const response = await axios.get(`${API_BASE_URL}/api/templates`, {
-                params: { compound_id: compoundId }
-            });
-            setTemplates(response.data.data || []);
-        } catch (error) {
-            setState(prev => ({ 
-                ...prev, 
-                error: 'Failed to fetch templates.' 
-            }));
-        } finally {
-            setState(prev => ({ ...prev, isLoading: false }));
-        }
-    };
-
-    const handleCompoundSelect = (compound: Compound) => {
+    const handleCompoundSelect = useCallback((compound: Compound) => {
+        console.log('📋 选择化合物:', compound);
         setState(prev => ({ 
             ...prev, 
             selectedCompound: compound,
@@ -70,63 +257,152 @@ export const App: React.FC = () => {
         }));
         setBatchDataList([]);
         setProcessingStatus('');
-    };
+    }, []);
 
-    const handleTemplateSelect = (template: Template) => {
+    const handleTemplateSelect = useCallback((template: Template) => {
+        console.log('📋 选择模板:', template);
         setState(prev => ({ 
             ...prev, 
             selectedTemplate: template 
         }));
         setProcessingStatus('');
-    };
+    }, []);
 
-const handleProcessFiles = async () => {
-    if (!state.selectedCompound || !state.selectedTemplate) {
-        setState(prev => ({ 
-            ...prev, 
-            error: 'Please select compound and template first.' 
-        }));
-        return;
-    }
+    // 添加重新连接按钮处理函数
+    const handleReconnect = useCallback(async () => {
+        const isConnected = await checkConnection();
+        if (isConnected) {
+            // 重新获取数据
+            fetchCompounds();
+        }
+    }, [checkConnection, fetchCompounds]);
 
-    try {
-        setState(prev => ({ ...prev, isLoading: true, error: undefined }));
-        setProcessingStatus('Checking database for existing batch analysis data...');
-        
-        // 第一步：检查数据库中是否已有数据
-        const cacheCheckResponse = await axios.get(
-            `${API_BASE_URL}/api/documents/check-cache`,
-            { 
-                params: {
-                    compound_id: state.selectedCompound.id,
-                    template_id: state.selectedTemplate.id
+    const handleProcessFiles = useCallback(async () => {
+        if (!state.selectedCompound || !state.selectedTemplate) {
+            setState(prev => ({ 
+                ...prev, 
+                error: 'Please select compound and template first.' 
+            }));
+            return;
+        }
+
+        // 防止重复点击
+        if (processingRef.current) return;
+        processingRef.current = true;
+
+        try {
+            setState(prev => ({ ...prev, isLoading: true, error: undefined }));
+            setProcessingStatus('Checking database for existing batch analysis data...');
+            
+            // 第一步：检查数据库中是否已有数据
+            const cacheCheckResponse = await axios.get(
+                `${API_BASE_URL}/api/documents/check-cache`,
+                { 
+                    params: {
+                        compound_id: state.selectedCompound.id,
+                        template_id: state.selectedTemplate.id
+                    }
                 }
-            }
-        );
-
-        const cachedData = cacheCheckResponse.data.data;
-        
-        if (cachedData && cachedData.batchData && cachedData.batchData.length > 0) {
-            // 如果数据库中有数据，直接使用
-            setBatchDataList(cachedData.batchData);
-            setProcessingStatus(
-                `Found existing data: ${cachedData.batchData.length} batches loaded from database. ` +
-                `Last updated: ${new Date(cachedData.lastUpdated).toLocaleString()}`
             );
+
+            const cachedData = cacheCheckResponse.data.data;
             
-            console.log('使用缓存数据:', cachedData.batchData);
-        } else {
-            // 如果数据库中没有数据，进行PDF处理
-            setProcessingStatus('No cached data found. Scanning PDF files and extracting batch analysis data...');
+            if (cachedData && cachedData.batchData && cachedData.batchData.length > 0) {
+                // 如果数据库中有数据，直接使用
+                setBatchDataList(cachedData.batchData);
+                setProcessingStatus(
+                    `Found existing data: ${cachedData.batchData.length} batches loaded from database. ` +
+                    `Last updated: ${new Date(cachedData.lastUpdated).toLocaleString()}`
+                );
+                
+                console.log('使用缓存数据:', cachedData.batchData);
+            } else {
+                // 如果数据库中没有数据，进行PDF处理
+                setProcessingStatus('No cached data found. Scanning PDF files and extracting batch analysis data...');
+                
+                const requestData = {
+                    compound_id: state.selectedCompound.id,
+                    template_id: state.selectedTemplate.id,
+                    force_reprocess: false
+                };
+                
+                console.log('发送处理请求:', requestData);
+                
+                const processResponse = await axios.post(
+                    `${API_BASE_URL}/api/documents/process-directory`,
+                    requestData,
+                    {
+                        headers: {
+                            'Content-Type': 'application/json'
+                        }
+                    }
+                );
+
+                const batchData = processResponse.data.data.batchData || [];
+                setBatchDataList(batchData);
+                
+                setProcessingStatus(`Successfully processed and cached ${batchData.length} batches!`);
+                console.log('新处理数据:', batchData);
+            }
+
+        } catch (error) {
+            console.error('处理文件时出错:', error);
             
-            // 修正：使用纯 JSON 格式发送请求
+            if (axios.isAxiosError(error) && error.response) {
+                const response = error.response;
+                console.error('响应错误:', response.data);
+                console.error('状态码:', response.status);
+                
+                let errorMessage = 'Failed to process files. ';
+                if (response.status === 422) {
+                    errorMessage += 'Request validation failed. ';
+                    if (response.data?.detail) {
+                        errorMessage += `Details: ${JSON.stringify(response.data.detail)}`;
+                    }
+                } else if (response.data?.detail) {
+                    errorMessage += response.data.detail;
+                } else {
+                    errorMessage += 'Please try again.';
+                }
+                
+                setState(prev => ({ 
+                    ...prev, 
+                    error: errorMessage
+                }));
+            } else {
+                setState(prev => ({ 
+                    ...prev, 
+                    error: 'Failed to process files. Please try again.' 
+                }));
+            }
+            setProcessingStatus('');
+        } finally {
+            processingRef.current = false;
+            if (mountedRef.current) {
+                setState(prev => ({ ...prev, isLoading: false }));
+            }
+        }
+    }, [state.selectedCompound, state.selectedTemplate]);
+
+
+    const handleForceReprocess = useCallback(async () => {
+        if (!state.selectedCompound || !state.selectedTemplate) {
+            setState(prev => ({ 
+                ...prev, 
+                error: 'Please select compound and template first.' 
+            }));
+            return;
+        }
+
+        try {
+            setState(prev => ({ ...prev, isLoading: true, error: undefined }));
+            setProcessingStatus('Force reprocessing: Scanning PDF files and updating database...');
+            
             const requestData = {
                 compound_id: state.selectedCompound.id,
                 template_id: state.selectedTemplate.id,
-                force_reprocess: false // 包含在 JSON body 中
+                force_reprocess: true
             };
-            
-            console.log('发送处理请求:', requestData);
             
             const processResponse = await axios.post(
                 `${API_BASE_URL}/api/documents/process-directory`,
@@ -141,103 +417,22 @@ const handleProcessFiles = async () => {
             const batchData = processResponse.data.data.batchData || [];
             setBatchDataList(batchData);
             
-            setProcessingStatus(`Successfully processed and cached ${batchData.length} batches!`);
-            console.log('新处理数据:', batchData);
-        }
+            setProcessingStatus(`Force reprocessed and updated ${batchData.length} batches in database!`);
+            console.log('强制重新处理数据:', batchData);
 
-    } catch (error) {
-        console.error('处理文件时出错:', error);
-        
-        if (
-            typeof error === 'object' &&
-            error !== null &&
-            'response' in error &&
-            typeof (error as any).response === 'object' &&
-            (error as any).response !== null
-        ) {
-            const response = (error as any).response;
-            console.error('响应错误:', response.data);
-            console.error('状态码:', response.status);
-            
-            let errorMessage = 'Failed to process files. ';
-            if (response.status === 422) {
-                errorMessage += 'Request validation failed. ';
-                if (response.data?.detail) {
-                    errorMessage += `Details: ${JSON.stringify(response.data.detail)}`;
-                }
-            } else if (response.data?.detail) {
-                errorMessage += response.data.detail;
-            } else {
-                errorMessage += 'Please try again.';
-            }
-            
+        } catch (error) {
+            console.error('强制重新处理时出错:', error);
             setState(prev => ({ 
                 ...prev, 
-                error: errorMessage
+                error: 'Failed to force reprocess files. Please try again.' 
             }));
-        } else {
-            setState(prev => ({ 
-                ...prev, 
-                error: 'Failed to process files. Please try again.' 
-            }));
+            setProcessingStatus('');
+        } finally {
+            setState(prev => ({ ...prev, isLoading: false }));
         }
-        setProcessingStatus('');
-    } finally {
-        setState(prev => ({ ...prev, isLoading: false }));
-    }
-};
+    }, [state.selectedCompound, state.selectedTemplate]);
 
-// 同样更新 handleForceReprocess 函数
-const handleForceReprocess = async () => {
-    if (!state.selectedCompound || !state.selectedTemplate) {
-        setState(prev => ({ 
-            ...prev, 
-            error: 'Please select compound and template first.' 
-        }));
-        return;
-    }
-
-    try {
-        setState(prev => ({ ...prev, isLoading: true, error: undefined }));
-        setProcessingStatus('Force reprocessing: Scanning PDF files and updating database...');
-        
-        // 强制重新处理PDF文件
-        const requestData = {
-            compound_id: state.selectedCompound.id,
-            template_id: state.selectedTemplate.id,
-            force_reprocess: true // 强制重新处理
-        };
-        
-        const processResponse = await axios.post(
-            `${API_BASE_URL}/api/documents/process-directory`,
-            requestData,
-            {
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            }
-        );
-
-        const batchData = processResponse.data.data.batchData || [];
-        setBatchDataList(batchData);
-        
-        setProcessingStatus(`Force reprocessed and updated ${batchData.length} batches in database!`);
-        console.log('强制重新处理数据:', batchData);
-
-    } catch (error) {
-        console.error('强制重新处理时出错:', error);
-        setState(prev => ({ 
-            ...prev, 
-            error: 'Failed to force reprocess files. Please try again.' 
-        }));
-        setProcessingStatus('');
-    } finally {
-        setState(prev => ({ ...prev, isLoading: false }));
-    }
-};
-
-    // 新增：清除缓存功能
-    const handleClearCache = async () => {
+    const handleClearCache = useCallback(async () => {
         if (!state.selectedCompound || !state.selectedTemplate) {
             setState(prev => ({ 
                 ...prev, 
@@ -274,11 +469,10 @@ const handleForceReprocess = async () => {
         } finally {
             setState(prev => ({ ...prev, isLoading: false }));
         }
-    };
+    }, [state.selectedCompound, state.selectedTemplate]);
 
-
-    // 根据模板信息创建完整的Word文档
-    const handleCreateWordDocument = async () => {
+    // 根据模板信息创建完整的Word文档 - 优化版本
+    const handleCreateWordDocument = useCallback(async () => {
         if (!state.selectedTemplate || batchDataList.length === 0) {
             setState(prev => ({ 
                 ...prev, 
@@ -295,9 +489,24 @@ const handleForceReprocess = async () => {
                 // 清空文档
                 context.document.body.clear();
                 
-                // 应用模板信息创建文档结构
-                await createDocumentFromTemplate(context);
+                // 批量操作：收集所有操作后统一执行
+                const operations: (() => void)[] = [];
                 
+                // 创建目录和表格列表（在同一页）
+                operations.push(() => createTableOfContentsAndListOfTables(context));
+                
+                // 插入分页符
+                operations.push(() => {
+                    context.document.body.insertBreak(Word.BreakType.page, Word.InsertLocation.end);
+                });
+                
+                // 创建主要内容 - S.4.4 Batch Analyses
+                operations.push(() => createBatchAnalysesSection(context));
+                
+                // 执行所有操作
+                operations.forEach(op => op());
+                
+                // 只在最后执行一次sync
                 await context.sync();
             });
             
@@ -312,41 +521,13 @@ const handleForceReprocess = async () => {
         } finally {
             setState(prev => ({ ...prev, isLoading: false }));
         }
-    };
+    }, [state.selectedTemplate, batchDataList]);
+
 
     // 根据模板信息创建完整文档结构
-    const createDocumentFromTemplate = async (context: Word.RequestContext) => {
+    const createTableOfContentsAndListOfTables = (context: Word.RequestContext) => {
         try {
-            // 1. 创建目录页
-            await createTableOfContents(context);
-            await context.sync();
-            
-            // 2. 插入分页符
-            context.document.body.insertBreak(Word.BreakType.page, Word.InsertLocation.end);
-            await context.sync();
-            
-            // 3. 创建List of Tables页
-            await createListOfTables(context);
-            await context.sync();
-            
-            // 4. 插入分页符
-            context.document.body.insertBreak(Word.BreakType.page, Word.InsertLocation.end);
-            await context.sync();
-            
-            // 5. 创建主要内容 - S.4.4 Batch Analyses
-            await createBatchAnalysesSection(context);
-            await context.sync();
-            
-        } catch (error) {
-            console.error('创建文档模板时出错:', error);
-            throw error;
-        }
-    };
-
-    // 创建目录页 - 应用模板格式
-    const createTableOfContents = async (context: Word.RequestContext) => {
-        try {
-            // 标题: Table of Contents - 应用C-TOC Title样式
+            // 标题: Table of Contents
             const tocTitle = context.document.body.insertParagraph('Table of Contents', Word.InsertLocation.end);
             tocTitle.alignment = Word.Alignment.centered;
             tocTitle.font.name = 'Times New Roman';
@@ -355,58 +536,55 @@ const handleForceReprocess = async () => {
             tocTitle.font.color = '#000000';
             tocTitle.spaceAfter = 12;
             tocTitle.spaceBefore = 0;
-            tocTitle.font.italic = false;
 
-            // 空行
-            context.document.body.insertParagraph('', Word.InsertLocation.end);
-
-            // TOC 条目 - 应用toc 1样式
+            // TOC 条目
             const tocItems = [
-                { text: 'TABLE OF CONTENTS  ', page: '1' },
-                { text: 'LIST OF TABLES  ', page: '1' },
-                { text: 'S.4.4  BATCH ANALYSES  ', page: '2' }
+                { text: 'Table of Contents', page: '1' },
+                { text: 'List of Tables', page: '1' },
+                { text: 'S.4.4\tBatch Analyses', page: '2' }
             ];
 
             tocItems.forEach(item => {
-                const tocEntry = context.document.body.insertParagraph(item.text + '\t' + item.page, Word.InsertLocation.end);
+                const tocEntry = context.document.body.insertParagraph('', Word.InsertLocation.end);
+                
+                // 插入带有内部链接的文本
+                if (item.text === 'S.4.4\tBatch Analyses') {
+                    tocEntry.insertText(item.text, Word.InsertLocation.end);
+                    tocEntry.insertText('\t' + item.page, Word.InsertLocation.end);
+                    // 注意：Word JS API 目前不支持直接创建内部超链接
+                    // 需要使用书签或其他方法实现
+                } else {
+                    tocEntry.insertText(item.text + '\t' + item.page, Word.InsertLocation.end);
+                }
+                
                 tocEntry.alignment = Word.Alignment.left;
                 tocEntry.font.name = 'Times New Roman';
                 tocEntry.font.size = 12;
                 tocEntry.font.color = '#0000FF';
                 tocEntry.leftIndent = 0;
-                tocEntry.firstLineIndent = 0;
                 tocEntry.spaceAfter = 0;
                 tocEntry.spaceBefore = 0;
-                tocEntry.font.italic = false;
             });
-        } catch (error) {
-            console.error('创建目录时出错:', error);
-            throw error;
-        }
-    };
 
-    // 创建表格列表页 - 应用模板格式
-    const createListOfTables = async (context: Word.RequestContext) => {
-        try {
-            // 标题: List of Tables - 应用C-TOC Title样式
-            const listTitle = context.document.body.insertParagraph('LIST OF TABLES', Word.InsertLocation.end);
+            // 空行分隔
+            context.document.body.insertParagraph('', Word.InsertLocation.end);
+
+            // 标题: List of Tables - 在同一页
+            const listTitle = context.document.body.insertParagraph('List of Tables', Word.InsertLocation.end);
             listTitle.alignment = Word.Alignment.centered;
             listTitle.font.name = 'Times New Roman';
             listTitle.font.size = 14;
             listTitle.font.bold = true;
             listTitle.font.color = '#000000';
             listTitle.spaceAfter = 12;
-            listTitle.spaceBefore = 0;
-            listTitle.font.italic = false;
+            listTitle.spaceBefore = 12;
 
-            // 空行
-            context.document.body.insertParagraph('', Word.InsertLocation.end);
-
-            // 表格列表条目 - 应用table of figures样式
+            // 表格列表条目
             const tableItems = [
-                { text: 'Table 1:	Overview of BGB-16673 Drug Substance Batches', page: '2' },
-                { text: 'Table 2:	Batch Analysis for GMP Batches of BGB-16673 Drug Substance', page: '3' },
-                { text: 'Table 3:	Batch Results for GMP Batches of BGB-16673 Drug Substance', page: '5' }
+                { text: 'Table 1:\tOverview of BGB-16673 Drug Substance Batches', page: '2' },
+                { text: 'Table 2:\tBatch Analysis for Toxicology Batches of BGB-16673 Drug Substance', page: '3' },
+                { text: 'Table 3:\tBatch Analysis for GMP Batches of BGB-16673 Drug Substance', page: '5' },
+                { text: 'Table 4:\tBatch Results for GMP Batches of BGB-16673 Drug Substance', page: '7' }
             ];
 
             tableItems.forEach(item => {
@@ -416,16 +594,15 @@ const handleForceReprocess = async () => {
                 tableEntry.font.size = 12;
                 tableEntry.font.color = '#0000FF';
                 tableEntry.leftIndent = 0;
-                tableEntry.firstLineIndent = 0;
                 tableEntry.spaceAfter = 0;
                 tableEntry.spaceBefore = 0;
-                tableEntry.font.italic = false;
             });
         } catch (error) {
-            console.error('创建表格列表时出错:', error);
+            console.error('创建目录时出错:', error);
             throw error;
         }
     };
+
 
     // 创建批次分析主要内容 - 应用模板格式
     const createBatchAnalysesSection = async (context: Word.RequestContext) => {
@@ -1164,6 +1341,65 @@ const handleForceReprocess = async () => {
             <Stack.Item>
                 <Text variant="xLarge" className="app-title">AIMTA Batch Analysis Processor</Text>
             </Stack.Item>
+
+                        {/* 连接状态显示 - 新增 */}
+            <MessageBar 
+                messageBarType={connectionStatus.isConnected ? MessageBarType.success : MessageBarType.warning}
+                isMultiline={true}
+            >
+                <div>
+                    <strong>API连接状态:</strong> {connectionStatus.message}
+                    <br />
+                    <small>API地址: {connectionStatus.apiUrl}</small>
+                    {connectionStatus.lastChecked && (
+                        <>
+                            <br />
+                            <small>最后检查: {connectionStatus.lastChecked.toLocaleTimeString()}</small>
+                        </>
+                    )}
+                    {connectionStatus.responseTime && (
+                        <>
+                            <br />
+                            <small>响应时间: {connectionStatus.responseTime}ms</small>
+                        </>
+                    )}
+                </div>
+            </MessageBar>
+
+            {state.error && (
+                <MessageBar 
+                    messageBarType={MessageBarType.error}
+                    onDismiss={() => setState(prev => ({ ...prev, error: undefined }))}
+                    isMultiline={true}
+                >
+                    {state.error}
+                </MessageBar>
+            )}
+
+            {state.isLoading && (
+                <Stack horizontalAlign="center" tokens={{ padding: 20 }}>
+                    <Spinner size={SpinnerSize.large} label="Processing..." />
+                </Stack>
+            )}
+
+            {processingStatus && (
+                <MessageBar messageBarType={MessageBarType.info}>
+                    {processingStatus}
+                </MessageBar>
+            )}
+
+            {/* 如果连接失败，显示重试按钮 - 新增 */}
+            {!connectionStatus.isConnected && (
+                <Stack horizontalAlign="center" tokens={{ padding: 20 }}>
+                    <PrimaryButton
+                        text="重新测试连接"
+                        iconProps={{ iconName: 'Refresh' }}
+                        onClick={handleReconnect}
+                        disabled={state.isLoading}
+                    />
+                </Stack>
+            )}
+
 
             {state.error && (
                 <MessageBar 

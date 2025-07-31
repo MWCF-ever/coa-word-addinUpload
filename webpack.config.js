@@ -5,12 +5,16 @@ const fs = require('fs');
 
 module.exports = (env, argv) => {
   const isDev = argv.mode === 'development';
+  const isLocalDev = isDev && process.env.NODE_ENV !== 'production';
   
-  // HTTPS证书配置
-  const httpsOptions = {
-    key: fs.readFileSync(path.join(__dirname, './certs/localhost.key')),
-    cert: fs.readFileSync(path.join(__dirname, './certs/localhost.crt'))
-  };
+  // HTTPS证书配置 - 只在本地开发时使用
+  let httpsOptions = false;
+  if (isLocalDev && fs.existsSync(path.join(__dirname, './certs/localhost.key'))) {
+    httpsOptions = {
+      key: fs.readFileSync(path.join(__dirname, './certs/localhost.key')),
+      cert: fs.readFileSync(path.join(__dirname, './certs/localhost.crt'))
+    };
+  }
 
   return {
     entry: {
@@ -19,8 +23,10 @@ module.exports = (env, argv) => {
     },
     output: {
       path: path.resolve(__dirname, 'dist'),
-      filename: '[name].[contenthash].js',
-      clean: true
+      filename: isDev ? '[name].js' : '[name].[contenthash].js',
+      clean: true,
+      // 添加publicPath配置，确保资源路径正确
+      publicPath: '/'
     },
     resolve: {
       extensions: ['.ts', '.tsx', '.js', '.jsx']
@@ -67,12 +73,14 @@ module.exports = (env, argv) => {
           },
           {
             from: 'assets',
-            to: 'assets'
+            to: 'assets',
+            noErrorOnMissing: true // 如果assets文件夹不存在，不报错
           }
         ]
       })
     ],
-    devServer: {
+    // devServer配置只在本地开发时有效
+    devServer: isLocalDev ? {
       hot: true,
       https: httpsOptions,
       port: 3000,
@@ -84,7 +92,7 @@ module.exports = (env, argv) => {
       static: {
         directory: path.join(__dirname, 'dist')
       }
-    },
+    } : undefined,
     optimization: {
       splitChunks: {
         chunks: 'all',

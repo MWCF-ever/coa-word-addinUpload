@@ -99,12 +99,65 @@ export interface COATable {
 export const API_BASE_URL = (() => {
   const hostname = window.location.hostname;
 
-  // 本地开发环境（localhost 或 127.0.0.1）
-  if (hostname === "localhost" || hostname === "127.0.0.1") {
-    return "https://localhost:8000";
+  console.log(`前端域名: ${hostname}`);
+  console.log(`完整URL: ${window.location.href}`);  
+
+  // 生产环境 - beone-d.beigenecorp.net
+  if (hostname === "beone-d.beigenecorp.net" || hostname.includes("beigenecorp.net")) {
+    const apiUrl = "https://beone-d.beigenecorp.net/api/aimta";
+    console.log(`使用生产环境API: ${apiUrl}`);
+    return apiUrl;
   }
-  return "https://10.8.63.207:8000"; 
+  
+  // 本地开发环境
+  if (hostname === "localhost" || hostname === "127.0.0.1") {
+    const apiUrl = "https://localhost:8000";
+    console.log(`使用本地开发API: ${apiUrl}`);
+    return apiUrl;
+  }
+  
+  // 开发环境IP
+  if (hostname === "10.8.63.207") {
+    const apiUrl = "https://10.8.63.207:8000";
+    console.log(`使用开发IP API: ${apiUrl}`);
+    return apiUrl;
+  }
+  
+  // 默认返回生产环境
+  const defaultUrl = "https://beone-d.beigenecorp.net/api/aimta";
+  console.log(`使用默认API: ${defaultUrl}`);
+  return defaultUrl;
 })();
+
+
+// 测试API连接的辅助函数
+export const testApiConnection = async (): Promise<boolean> => {
+  try {
+    console.log(`🔍 测试API连接: ${API_BASE_URL}`);
+    
+    const response = await fetch(`${API_BASE_URL}/api/health`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      // 添加CORS相关配置
+      mode: 'cors',
+      credentials: 'omit'
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      console.log(`✅ API连接成功:`, data);
+      return true;
+    } else {
+      console.error(`❌ API连接失败: ${response.status} ${response.statusText}`);
+      return false;
+    }
+  } catch (error) {
+    console.error(`❌ API连接异常:`, error);
+    return false;
+  }
+};
 
 // Template test parameters mapping
 export const TEMPLATE_TEST_PARAMETERS = {
