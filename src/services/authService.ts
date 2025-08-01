@@ -1,4 +1,4 @@
-// src/services/authService.ts
+// src/services/authService.ts - 修复版本
 import { PublicClientApplication, Configuration, SilentRequest, PopupRequest, AuthenticationResult, AccountInfo } from "@azure/msal-browser";
 
 interface AuthConfig {
@@ -134,6 +134,10 @@ export class AuthService {
             if (cachedToken && !this.isTokenExpired(cachedToken)) {
                 console.log('📋 发现缓存的token，尝试恢复用户状态');
                 this.fetchUserInfoFromToken(cachedToken);
+            } else if (cachedToken) {
+                console.log('⚠️ 发现过期的token，清理缓存');
+                sessionStorage.removeItem('token');
+                sessionStorage.removeItem('refreshToken');
             }
         }
     }
@@ -147,20 +151,85 @@ export class AuthService {
             
             console.log('📋 Token payload:', payload);
             
+            // 更详细的用户信息提取
             this.currentUser = {
-                id: payload.sub || payload.oid,
-                name: payload.name || payload.preferred_username,
-                email: payload.email || payload.preferred_username,
+                id: payload.sub || payload.oid || payload.objectId,
+                name: payload.name || payload.given_name + ' ' + payload.family_name || payload.preferred_username,
+                email: payload.email || payload.preferred_username || payload.upn,
                 role: payload.roles?.[0] || payload.role
             };
 
+            // 验证用户信息的完整性
+            if (!this.currentUser.email || this.currentUser.email === 'undefined') {
+                console.warn('⚠️ 用户邮箱信息缺失，尝试其他字段');
+                this.currentUser.email = payload.upn || payload.unique_name || '未知邮箱';
+            }
+
             console.log('👤 用户信息设置完成:', this.currentUser);
+
+            // 验证token有效性（调用后端验证）
+            await this.validateTokenWithBackend(token);
 
             // 触发用户状态更新事件
             this.notifyUserStateChange();
         } catch (error) {
             console.error('❌ 解析token获取用户信息失败:', error);
+            // 清理无效token
+            sessionStorage.removeItem('token');
+            sessionStorage.removeItem('refreshToken');
+            this.currentUser = null;
         }
+    }
+
+    private async validateTokenWithBackend(token: string): Promise<void> {
+        try {
+            console.log('🔐 验证token有效性...');
+            
+            const response = await fetch(`${this.getApiBaseUrl()}/auth/status`, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                console.log('✅ Token验证成功:', data);
+                
+                // 如果后端返回了更完整的用户信息，更新当前用户
+                if (data.user && data.authenticated) {
+                    this.currentUser = {
+                        ...this.currentUser,
+                        ...data.user
+                    };
+                }
+            } else {
+                console.error('❌ Token验证失败:', response.status, response.statusText);
+                throw new Error(`Token validation failed: ${response.status}`);
+            }
+        } catch (error) {
+            console.error('❌ 后端token验证失败:', error);
+            throw error;
+        }
+    }
+
+    private getApiBaseUrl(): string {
+        const hostname = window.location.hostname;
+        
+        if (hostname === "beone-d.beigenecorp.net" || hostname.includes("beigenecorp.net")) {
+            return "https://beone-d.beigenecorp.net/api/aimta";
+        }
+        
+        if (hostname === "localhost" || hostname === "127.0.0.1") {
+            return "https://localhost:8000";
+        }
+        
+        if (hostname === "10.8.63.207") {
+            return "https://10.8.63.207:8000";
+        }
+        
+        return "https://beone-d.beigenecorp.net/api/aimta";
     }
 
     private parseJwtToken(token: string): any {
@@ -201,12 +270,16 @@ export class AuthService {
             // 首先检查sessionStorage中的token
             const cachedToken = sessionStorage.getItem('token');
             if (cachedToken && !this.isTokenExpired(cachedToken)) {
+                console.log('🔄 使用缓存的token');
                 return cachedToken;
             }
+
+            console.log('🔄 缓存token无效，尝试刷新...');
 
             // 尝试MSAL静默获取
             const account = this.msalInstance.getActiveAccount() || this.msalInstance.getAllAccounts()[0];
             if (!account) {
+                console.log('❌ 没有活跃账户，无法静默获取token');
                 return null;
             }
 
@@ -223,9 +296,10 @@ export class AuthService {
                 await this.setCurrentUser(response);
             }
 
+            console.log('✅ 静默token获取成功');
             return response.accessToken;
         } catch (error) {
-            console.error('Silent token acquisition failed:', error);
+            console.error('❌ Silent token acquisition failed:', error);
             return null;
         }
     }
@@ -310,7 +384,19 @@ export class AuthService {
     public isAuthenticated(): boolean {
         const token = sessionStorage.getItem('token');
         const hasActiveAccount = this.msalInstance.getAllAccounts().length > 0;
-        return (token && !this.isTokenExpired(token)) || hasActiveAccount;
+        const userExists = !!this.currentUser;
+        
+        const isAuth = (token && !this.isTokenExpired(token) && userExists) || hasActiveAccount;
+        
+        console.log('🔍 认证状态检查:', {
+            hasToken: !!token,
+            tokenValid: token ? !this.isTokenExpired(token) : false,
+            hasActiveAccount,
+            userExists,
+            isAuthenticated: isAuth
+        });
+        
+        return isAuth;
     }
 
     // Token续期检查
@@ -318,12 +404,13 @@ export class AuthService {
         const token = sessionStorage.getItem('token');
         
         if (!token) {
+            console.log('🔄 没有token，尝试静默获取');
             return await this.getTokenSilently();
         }
 
         // 检查token是否即将过期（5分钟内）
         if (this.isTokenExpiringSoon(token, 5 * 60 * 1000)) {
-            console.log('Token expiring soon, attempting refresh...');
+            console.log('🔄 Token即将过期，尝试刷新...');
             return await this.getTokenSilently();
         }
 
@@ -346,8 +433,15 @@ export class AuthService {
         try {
             const payload = this.parseJwtToken(token);
             const currentTime = Math.floor(Date.now() / 1000);
-            return payload.exp < currentTime;
+            const isExpired = payload.exp < currentTime;
+            
+            if (isExpired) {
+                console.log('⚠️ Token已过期');
+            }
+            
+            return isExpired;
         } catch {
+            console.log('⚠️ Token解析失败，视为过期');
             return true;
         }
     }
