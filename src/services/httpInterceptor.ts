@@ -1,4 +1,4 @@
-// src/services/httpInterceptor.ts - 修复Mixed Content问题
+// src/services/httpInterceptor.ts - 同域配置版本
 import axios, { AxiosRequestConfig, AxiosResponse, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import { authService } from './authService';
 
@@ -6,52 +6,10 @@ interface AuthAxiosRequestConfig extends InternalAxiosRequestConfig {
     _retry?: boolean;
 }
 
-// 修复：更准确的baseURL检测
-function getApiBaseUrl(): string {
-    const hostname = window.location.hostname;
-    
-    console.log('🔍 检测API baseURL:', {
-        hostname,
-        protocol: window.location.protocol,
-        href: window.location.href
-    });
-    
-    // 🔥 关键修复：无论从哪里访问，都使用HTTPS的生产环境地址
-    if (hostname.includes("sharepoint.com") || 
-        hostname === "beone-d.beigenecorp.net" || 
-        hostname.includes("beigenecorp.net") ||
-        hostname.includes("office.com") ||
-        hostname.includes("officeapps.live.com")) {
-        
-        const apiUrl = "https://beone-d.beigenecorp.net/api/aimta";
-        console.log(`✅ 使用生产环境API (Office环境): ${apiUrl}`);
-        return apiUrl;
-    }
-    
-    // 本地开发环境
-    if (hostname === "localhost" || hostname === "127.0.0.1") {
-        const apiUrl = "https://localhost:8000";
-        console.log(`✅ 使用本地开发API: ${apiUrl}`);
-        return apiUrl;
-    }
-    
-    // 开发环境IP
-    if (hostname === "10.8.63.207") {
-        const apiUrl = "https://10.8.63.207:8000";
-        console.log(`✅ 使用开发IP API: ${apiUrl}`);
-        return apiUrl;
-    }
-    
-    // 默认返回生产环境HTTPS地址
-    const defaultUrl = "https://beone-d.beigenecorp.net/api/aimta";
-    console.log(`✅ 使用默认API: ${defaultUrl}`);
-    return defaultUrl;
-}
-
-// 创建axios实例
+// 创建axios实例 - 使用相对路径
 export const createAuthenticatedAxiosInstance = (baseURL?: string) => {
-    // 🔥 修复：如果没有提供baseURL，自动检测
-    const finalBaseURL = baseURL || getApiBaseUrl();
+    // 同域配置 - 使用相对路径
+    const finalBaseURL = baseURL || '/api/aimta';
     
     console.log(`🔧 创建axios实例，baseURL: ${finalBaseURL}`);
     
@@ -67,13 +25,6 @@ export const createAuthenticatedAxiosInstance = (baseURL?: string) => {
     axiosInstance.interceptors.request.use(
         async (config: InternalAxiosRequestConfig): Promise<InternalAxiosRequestConfig> => {
             try {
-                // 🔥 修复：确保请求URL是绝对HTTPS URL
-                if (config.url && !config.url.startsWith('http')) {
-                    // 如果是相对URL，确保使用正确的baseURL
-                    const fullUrl = `${finalBaseURL}${config.url.startsWith('/') ? '' : '/'}${config.url}`;
-                    console.log(`🔗 构建完整URL: ${config.url} -> ${fullUrl}`);
-                }
-                
                 // 检查并刷新token（如果需要）
                 const token = await authService.refreshTokenIfNeeded();
                 
@@ -152,26 +103,6 @@ export const createAuthenticatedAxiosInstance = (baseURL?: string) => {
                 message: error.message,
                 code: error.code
             });
-            
-            // 🔥 特殊处理Mixed Content错误
-            if (error.message === 'Network Error' && 
-                (error.code === 'ERR_NETWORK' || error.code === 'ERR_BLOCKED_BY_CLIENT')) {
-                console.error('🚫 检测到Mixed Content或网络阻塞错误');
-                console.error('🔍 可能的原因：HTTP/HTTPS混合内容或CORS问题');
-                
-                // 尝试重新构建请求with强制HTTPS
-                if (originalRequest && !originalRequest._retry) {
-                    originalRequest._retry = true;
-                    
-                    // 强制使用HTTPS baseURL
-                    const httpsBaseURL = "https://beone-d.beigenecorp.net/api/aimta";
-                    console.log(`🔄 尝试使用HTTPS baseURL重试: ${httpsBaseURL}`);
-                    
-                    originalRequest.baseURL = httpsBaseURL;
-                    
-                    return axiosInstance(originalRequest);
-                }
-            }
             
             // 处理401未授权错误
             if ((error.response?.status === 401 || error.message === 'Unauthorized') && originalRequest && !originalRequest._retry) {
@@ -258,11 +189,8 @@ export const createAuthenticatedAxiosInstance = (baseURL?: string) => {
     return axiosInstance;
 };
 
-// 🔥 修复：使用动态检测的baseURL创建apiClient
+// 使用相对路径创建apiClient
 export const apiClient = createAuthenticatedAxiosInstance();
-
-// 重新导出createAuthenticatedAxiosInstance以便在其他地方使用
-// (Removed duplicate export of createAuthenticatedAxiosInstance)
 
 // Token监控和自动刷新
 class TokenMonitor {

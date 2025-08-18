@@ -16,8 +16,6 @@
   <SupportUrl DefaultValue="https://www.beigene.com"/>
   
   <AppDomains>
-    <AppDomain>https://localhost:3000</AppDomain>
-    <AppDomain>https://localhost:8000</AppDomain>
     <AppDomain>https://beone-d.beigenecorp.net</AppDomain>
   </AppDomains>
   
